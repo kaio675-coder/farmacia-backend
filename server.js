@@ -493,11 +493,16 @@ app.put('/api/movimentacoes', requireAuth, async (req, res) => {
 // RECÁLCULO DE ESTOQUE (helper)
 // =========================================================
 async function recalcularEstoque(client, produtoId) {
+  const estoqueInicialResult = await client.query(
+    'SELECT COALESCE(estoque_inicial, 0) AS estoque_inicial FROM estoques WHERE produto_id = $1',
+    [produtoId]
+  );
+  let estoque = estoqueInicialResult.rows.length ? Number(estoqueInicialResult.rows[0].estoque_inicial) : 0;
+
   const result = await client.query(
     'SELECT id, tipo, quantidade, data FROM movimentacoes WHERE produto_id = $1 ORDER BY data ASC, id ASC',
     [produtoId]
   );
-  let estoque = 0;
   for (const mov of result.rows) {
     const anterior = estoque;
     if (mov.tipo === 'entrada') {
