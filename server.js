@@ -80,6 +80,22 @@ async function ensureView() {
 
 ensureView().catch(err => console.error('Erro ao criar view:', err.message));
 
+async function ensureAuditTable() {
+  const sql = `
+    CREATE TABLE IF NOT EXISTS logs_auditoria (
+      id SERIAL PRIMARY KEY,
+      usuario_id INTEGER REFERENCES usuarios(id),
+      acao VARCHAR(100) NOT NULL,
+      tabela VARCHAR(100) NOT NULL,
+      dados_anteriores JSONB,
+      dados_novos JSONB,
+      criado_em TIMESTAMP DEFAULT NOW()
+    )
+  `;
+  await pool.query(sql);
+}
+ensureAuditTable().catch(err => console.error('Erro ao criar tabela de auditoria:', err.message));
+
 // =========================================================
 // ROTAS DE AUTENTICAÇÃO (não requerem auth)
 // =========================================================
@@ -470,6 +486,155 @@ app.put('/api/movimentacoes', requireAuth, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================================================
+// RECÁLCULO DE ESTOQUE (helper)
+// =========================================================
+async function recalcularEstoque(client, produtoId) {
+  const result = await client.query(
+    'SELECT id, tipo, quantidade, data FROM movimentacoes WHERE produto_id = $1 ORDER BY data ASC, id ASC',
+    [produtoId]
+  );
+  let estoque = 0;
+  for (const mov of result.rows) {
+    const anterior = estoque;
+    if (mov.tipo === 'entrada') {
+      estoque += Number(mov.quantidade);
+    } else if (mov.tipo === 'saida') {
+      estoque -= Number(mov.quantidade);
+    } else {
+      estoque = Number(mov.quantidade);
+    }
+    await client.query(
+      'UPDATE movimentacoes SET estoque_anterior = $1, estoque_posterior = $2 WHERE id = $3',
+      [anterior, estoque, mov.id]
+    );
+  }
+  await client.query(
+    'UPDATE estoques SET quantidade_atual = $1, updated_at = NOW() WHERE produto_id = $2',
+    [estoque, produtoId]
+  );
+  return estoque;
+}
+
+// =========================================================
+// DELETE /api/movimentacoes/:id - Excluir movimentação
+// =========================================================
+app.delete('/api/movimentacoes/:id', requireAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    await client.query('BEGIN');
+
+    const movResult = await client.query(
+      'SELECT m.*, p.nome AS produto_nome FROM movimentacoes m LEFT JOIN produtos p ON p.id = m.produto_id WHERE m.id = $1',
+      [id]
+    );
+    if (!movResult.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Movimentação não encontrada' });
+    }
+    const mov = movResult.rows[0];
+
+    await client.query('DELETE FROM movimentacoes WHERE id = $1', [id]);
+    const novoEstoque = await recalcularEstoque(client, mov.produto_id);
+
+    await client.query(
+      `INSERT INTO logs_auditoria (usuario_id, acao, tabela, dados_anteriores, dados_novos)
+       VALUES ($1, 'excluir_movimentacao', 'movimentacoes', $2, $3)`,
+      [
+        req.user.id,
+        JSON.stringify({
+          id: mov.id,
+          produto: mov.produto_nome,
+          tipo: mov.tipo,
+          quantidade: Number(mov.quantidade),
+          data: mov.data
+        }),
+        JSON.stringify({ estoque_recalculado: novoEstoque })
+      ]
+    );
+
+    await client.query('COMMIT');
+    res.json({ ok: true, estoqueRecalculado: novoEstoque });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Erro DELETE /api/movimentacoes/:id:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// =========================================================
+// PUT /api/movimentacoes/:id - Editar movimentação
+// =========================================================
+app.put('/api/movimentacoes/:id', requireAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { produto_id, data, quantidade, tipo, observacao } = req.body;
+    await client.query('BEGIN');
+
+    const movResult = await client.query(
+      'SELECT m.*, p.nome AS produto_nome FROM movimentacoes m LEFT JOIN produtos p ON p.id = m.produto_id WHERE m.id = $1',
+      [id]
+    );
+    if (!movResult.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Movimentação não encontrada' });
+    }
+    const antigo = movResult.rows[0];
+
+    const tipoDb = tipo === 'Entrada' ? 'entrada' : tipo === 'Saída' ? 'saida' : 'ajuste';
+    const dataMov = data ? new Date(data + 'T12:00:00Z') : antigo.data;
+
+    await client.query(
+      `UPDATE movimentacoes SET produto_id = $1, tipo = $2, quantidade = $3, data = $4, observacao = $5 WHERE id = $6`,
+      [produto_id || antigo.produto_id, tipoDb, quantidade, dataMov, observacao !== undefined ? observacao : antigo.observacao, id]
+    );
+
+    const targetProdutoId = produto_id || antigo.produto_id;
+    const novoEstoque = await recalcularEstoque(client, targetProdutoId);
+
+    if (targetProdutoId !== antigo.produto_id) {
+      await recalcularEstoque(client, antigo.produto_id);
+    }
+
+    await client.query(
+      `INSERT INTO logs_auditoria (usuario_id, acao, tabela, dados_anteriores, dados_novos)
+       VALUES ($1, 'editar_movimentacao', 'movimentacoes', $2, $3)`,
+      [
+        req.user.id,
+        JSON.stringify({
+          id: antigo.id,
+          produto: antigo.produto_nome,
+          tipo: antigo.tipo,
+          quantidade: Number(antigo.quantidade),
+          data: antigo.data,
+          observacao: antigo.observacao
+        }),
+        JSON.stringify({
+          produto_id: produto_id || antigo.produto_id,
+          tipo: tipoDb,
+          quantidade: Number(quantidade),
+          data: dataMov,
+          observacao: observacao !== undefined ? observacao : antigo.observacao,
+          estoque_recalculado: novoEstoque
+        })
+      ]
+    );
+
+    await client.query('COMMIT');
+    res.json({ ok: true, estoqueRecalculado: novoEstoque });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Erro PUT /api/movimentacoes/:id:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
