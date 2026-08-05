@@ -95,6 +95,9 @@ app.use('/api/usuarios', require('./routes/usuarios')(pool));
 // Importação de movimentações
 app.use('/api/movimentacoes', require('./routes/importacao')(pool));
 
+// Sistema de backup
+app.use('/api/backup', require('./routes/backup')(pool));
+
 // =========================================================
 // HELPERS
 // =========================================================
