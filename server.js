@@ -435,7 +435,8 @@ app.post('/api/movimentacoes', requireAuth, async (req, res) => {
     await client.query('BEGIN');
     const mov = req.body;
 
-    const tipoDb = mov.tipo === 'Entrada' ? 'entrada' : mov.tipo === 'Saída' ? 'saida' : 'ajuste';
+    const tipoLower = (mov.tipo || '').toLowerCase();
+    const tipoDb = tipoLower.includes('entrada') ? 'entrada' : tipoLower.includes('saida') || tipoLower.includes('saída') ? 'saida' : 'ajuste';
 
     const estoqueResult = await client.query(
       'SELECT quantidade_atual FROM estoques WHERE produto_id = $1',
@@ -593,7 +594,8 @@ app.put('/api/movimentacoes/:id', requireAuth, async (req, res) => {
     }
     const antigo = movResult.rows[0];
 
-    const tipoDb = tipo === 'Entrada' ? 'entrada' : tipo === 'Saída' ? 'saida' : 'ajuste';
+    const tipoLower = (tipo || '').toLowerCase();
+    const tipoDb = tipoLower.includes('entrada') ? 'entrada' : tipoLower.includes('saida') || tipoLower.includes('saída') ? 'saida' : 'ajuste';
     const dataMov = data ? new Date(data + 'T12:00:00Z') : antigo.data;
 
     await client.query(
