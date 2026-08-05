@@ -480,15 +480,7 @@ app.post('/api/movimentacoes', requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/movimentacoes', requireAuth, async (req, res) => {
-  try {
-    const items = req.body;
-    if (!Array.isArray(items)) return res.status(400).json({ error: 'Esperado um array' });
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+// (rota batch removida — usar PUT /api/movimentacoes/:id para editar)
 
 // =========================================================
 // RECÁLCULO DE ESTOQUE (helper)
