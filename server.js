@@ -59,9 +59,9 @@ async function ensureView() {
       COALESCE(e.quantidade_atual, 0) AS estoque_atual,
       COALESCE(e.estoque_minimo, 0) AS estoque_minimo,
       COALESCE(e.estoque_maximo, 0) AS estoque_maximo,
-      l.numero_lote AS lote,
-      l.validade AS lote_validade,
-      l.quantidade AS lote_quantidade,
+      (SELECT numero_lote FROM lotes WHERE produto_id = p.id ORDER BY criado_em DESC LIMIT 1) AS lote,
+      (SELECT validade FROM lotes WHERE produto_id = p.id ORDER BY criado_em DESC LIMIT 1) AS lote_validade,
+      (SELECT quantidade FROM lotes WHERE produto_id = p.id ORDER BY criado_em DESC LIMIT 1) AS lote_quantidade,
       m.principio_ativo,
       m.dosagem,
       m.forma_farmaceutica,
@@ -73,7 +73,6 @@ async function ensureView() {
     LEFT JOIN medicamentos m ON m.produto_id = p.id
     LEFT JOIN materiais mt ON mt.produto_id = p.id
     LEFT JOIN estoques e ON e.produto_id = p.id
-    LEFT JOIN lotes l ON l.produto_id = p.id
   `;
   await pool.query(sql);
 }
@@ -383,7 +382,11 @@ app.get('/api/movimentacoes', requireAuth, async (req, res) => {
     const result = await pool.query(`
       SELECT m.*, p.nome AS produto_nome,
         COALESCE((SELECT numero_lote FROM lotes WHERE produto_id = m.produto_id LIMIT 1), '') AS lote,
-        COALESCE((SELECT nf FROM v_produtos_completo WHERE id = m.produto_id), '') AS nf,
+        COALESCE(
+          (SELECT nota_fiscal FROM medicamentos WHERE produto_id = m.produto_id LIMIT 1),
+          (SELECT nota_fiscal FROM materiais WHERE produto_id = m.produto_id LIMIT 1),
+          ''
+        ) AS nf,
         COALESCE(u.nome, '') AS responsavel
       FROM movimentacoes m
       LEFT JOIN produtos p ON p.id = m.produto_id
