@@ -469,8 +469,29 @@ app.post('/api/movimentacoes', requireAuth, async (req, res) => {
       [estoquePosterior, mov.produto_id]
     );
 
+    const movResult = await client.query(
+      `SELECT m.*, p.nome AS produto_nome FROM movimentacoes m LEFT JOIN produtos p ON p.id = m.produto_id WHERE m.produto_id = $1 ORDER BY m.data DESC, m.id DESC LIMIT 1`,
+      [mov.produto_id]
+    );
+
     await client.query('COMMIT');
-    res.status(201).json({ ok: true, estoquePosterior });
+
+    const created = movResult.rows[0];
+    res.status(201).json({
+      ok: true,
+      id: created.id,
+      produto_id: created.produto_id,
+      tipo: created.tipo,
+      quantidade: Number(created.quantidade),
+      data: created.data ? created.data.toISOString().slice(0, 10) : '',
+      estoque_anterior: Number(created.estoque_anterior),
+      estoque_posterior: Number(created.estoque_posterior),
+      estoquePosterior: Number(created.estoque_posterior),
+      observacao: created.observacao || '',
+      responsavel_id: created.responsavel_id,
+      origem: created.origem || 'manual',
+      produto_nome: created.produto_nome || ''
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Erro POST /api/movimentacoes:', err.message);
@@ -479,8 +500,6 @@ app.post('/api/movimentacoes', requireAuth, async (req, res) => {
     client.release();
   }
 });
-
-// (rota batch removida — usar PUT /api/movimentacoes/:id para editar)
 
 // =========================================================
 // RECÁLCULO DE ESTOQUE (helper)
