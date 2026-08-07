@@ -240,6 +240,13 @@ app.post('/api/produtos', requireAuth, async (req, res) => {
          validade=EXCLUDED.validade, quantidade=EXCLUDED.quantidade`,
         [produtoId, p.lote, p.validade || null, p.estoqueAtual || 0]
       );
+    } else if (p.validade) {
+      const autoLote = `LOTE-${Date.now()}`;
+      await client.query(
+        `INSERT INTO lotes (produto_id, numero_lote, validade, quantidade)
+         VALUES ($1, $2, $3, $4)`,
+        [produtoId, autoLote, p.validade, p.estoqueAtual || 0]
+      );
     }
 
     await client.query('COMMIT');
@@ -303,6 +310,23 @@ app.put('/api/produtos', requireAuth, async (req, res) => {
            ON CONFLICT (produto_id, numero_lote) DO UPDATE SET validade=EXCLUDED.validade, quantidade=EXCLUDED.quantidade`,
           [p.id, p.lote, p.validade || null, p.estoqueAtual || 0]
         );
+      } else if (p.validade) {
+        const existingLotes = await client.query(
+          `SELECT id FROM lotes WHERE produto_id = $1`, [p.id]
+        );
+        if (existingLotes.rows.length > 0) {
+          await client.query(
+            `UPDATE lotes SET validade = $1, quantidade = $2 WHERE produto_id = $3`,
+            [p.validade, p.estoqueAtual || 0, p.id]
+          );
+        } else {
+          const autoLote = `LOTE-${Date.now()}`;
+          await client.query(
+            `INSERT INTO lotes (produto_id, numero_lote, validade, quantidade)
+             VALUES ($1, $2, $3, $4)`,
+            [p.id, autoLote, p.validade, p.estoqueAtual || 0]
+          );
+        }
       }
     }
 
@@ -363,6 +387,25 @@ app.put('/api/produtos/:id', requireAuth, async (req, res) => {
          ON CONFLICT (produto_id, numero_lote) DO UPDATE SET validade=EXCLUDED.validade, quantidade=EXCLUDED.quantidade`,
         [id, p.lote, p.validade || null, p.estoqueAtual || 0]
       );
+    } else if (p.validade) {
+      const existingLotes = await client.query(
+        `SELECT id, numero_lote FROM lotes WHERE produto_id = $1`, [id]
+      );
+      if (existingLotes.rows.length > 0) {
+        await client.query(
+          `UPDATE lotes SET validade = $1, quantidade = $2 WHERE produto_id = $3`,
+          [p.validade, p.estoqueAtual || 0, id]
+        );
+      } else {
+        const autoLote = `LOTE-${Date.now()}`;
+        await client.query(
+          `INSERT INTO lotes (produto_id, numero_lote, validade, quantidade)
+           VALUES ($1, $2, $3, $4)`,
+          [id, autoLote, p.validade, p.estoqueAtual || 0]
+        );
+      }
+    } else {
+      await client.query(`DELETE FROM lotes WHERE produto_id = $1`, [id]);
     }
 
     await client.query('COMMIT');
@@ -477,43 +520,53 @@ app.post('/api/movimentacoes', requireAuth, async (req, res) => {
     let loteId = null;
     let loteInfo = null;
 
-    if (tipoDb === 'entrada' && mov.lote && mov.lote.toString().trim()) {
-      const loteNum = mov.lote.toString().trim();
+    if (tipoDb === 'entrada') {
+      const loteNum = mov.lote && mov.lote.toString().trim() ? mov.lote.toString().trim() : null;
       const validade = mov.validade || null;
 
-      const existingLote = await client.query(
-        'SELECT id, quantidade FROM lotes WHERE produto_id = $1 AND numero_lote = $2',
-        [mov.produto_id, loteNum]
-      );
-
-      if (existingLote.rows.length > 0) {
-        loteId = existingLote.rows[0].id;
-        const qtdAtual = Number(existingLote.rows[0].quantidade) || 0;
-        const novaQtd = qtdAtual + Number(mov.quantidade);
-
-        const updateFields = ['quantidade = $1'];
-        const updateParams = [novaQtd];
-        let paramIdx = 2;
-
-        if (validade) {
-          updateFields.push(`validade = $${paramIdx++}`);
-          updateParams.push(validade);
-        }
-
-        updateParams.push(loteId);
-        await client.query(
-          `UPDATE lotes SET ${updateFields.join(', ')} WHERE id = $${paramIdx}`,
-          updateParams
+      if (loteNum) {
+        const existingLote = await client.query(
+          'SELECT id, quantidade FROM lotes WHERE produto_id = $1 AND numero_lote = $2',
+          [mov.produto_id, loteNum]
         );
 
-        loteInfo = { id: loteId, numero_lote: loteNum, validade, quantidade: novaQtd, atualizado: true };
-      } else {
+        if (existingLote.rows.length > 0) {
+          loteId = existingLote.rows[0].id;
+          const qtdAtual = Number(existingLote.rows[0].quantidade) || 0;
+          const novaQtd = qtdAtual + Number(mov.quantidade);
+
+          const updateFields = ['quantidade = $1'];
+          const updateParams = [novaQtd];
+          let paramIdx = 2;
+
+          if (validade) {
+            updateFields.push(`validade = $${paramIdx++}`);
+            updateParams.push(validade);
+          }
+
+          updateParams.push(loteId);
+          await client.query(
+            `UPDATE lotes SET ${updateFields.join(', ')} WHERE id = $${paramIdx}`,
+            updateParams
+          );
+
+          loteInfo = { id: loteId, numero_lote: loteNum, validade, quantidade: novaQtd, atualizado: true };
+        } else {
+          const insertResult = await client.query(
+            'INSERT INTO lotes (produto_id, numero_lote, validade, quantidade, data_entrada) VALUES ($1, $2, $3, $4, NOW()) RETURNING id',
+            [mov.produto_id, loteNum, validade, Number(mov.quantidade)]
+          );
+          loteId = insertResult.rows[0].id;
+          loteInfo = { id: loteId, numero_lote: loteNum, validade, quantidade: Number(mov.quantidade), atualizado: false };
+        }
+      } else if (validade) {
+        const autoLote = `LOTE-${Date.now()}`;
         const insertResult = await client.query(
           'INSERT INTO lotes (produto_id, numero_lote, validade, quantidade, data_entrada) VALUES ($1, $2, $3, $4, NOW()) RETURNING id',
-          [mov.produto_id, loteNum, validade, Number(mov.quantidade)]
+          [mov.produto_id, autoLote, validade, Number(mov.quantidade)]
         );
         loteId = insertResult.rows[0].id;
-        loteInfo = { id: loteId, numero_lote: loteNum, validade, quantidade: Number(mov.quantidade), atualizado: false };
+        loteInfo = { id: loteId, numero_lote: autoLote, validade, quantidade: Number(mov.quantidade), atualizado: false };
       }
     }
 
@@ -831,7 +884,7 @@ app.get('/api/lotes', requireAuth, async (req, res) => {
       SELECT l.*, p.nome AS produto_nome, p.codigo AS produto_codigo, p.tipo AS produto_tipo
       FROM lotes l
       LEFT JOIN produtos p ON p.id = l.produto_id
-      WHERE l.quantidade > 0
+      WHERE l.quantidade > 0 AND p.ativo = TRUE
     `;
     const params = [];
     if (produto_id) {
