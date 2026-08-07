@@ -64,10 +64,17 @@ module.exports = function(pool) {
         }
       } catch (e) {}
     }
-    const frontendPath = 'E:/SITE FARMACIA/index.html';
     try {
-      if (fs.existsSync(frontendPath)) {
-        files['frontend/index.html'] = fs.readFileSync(frontendPath, 'utf8');
+      const frontendCandidates = [
+        path.join(__dirname, '..', '..', 'frontend', 'index.html'),
+        path.join(__dirname, '..', '..', 'site', 'index.html'),
+        path.join(__dirname, '..', '..', '..', 'SITE FARMACIA', 'index.html')
+      ];
+      for (const fp of frontendCandidates) {
+        if (fs.existsSync(fp)) {
+          files['frontend/index.html'] = fs.readFileSync(fp, 'utf8');
+          break;
+        }
       }
     } catch (e) {}
     return files;
@@ -224,18 +231,20 @@ module.exports = function(pool) {
       try {
         await client.query('BEGIN');
 
-        const restoreOrder = [
-          'usuarios', 'produtos', 'medicamentos', 'materiais', 'estoques', 'lotes',
-          'entradas', 'entrada_itens', 'saidas', 'saida_itens',
-          'movimentacoes', 'ajustes_estoque', 'importacoes_movimentacoes',
-          'fornecedores', 'configuracoes', 'logs_auditoria'
-        ];
+  const validTables = new Set([
+    'usuarios', 'produtos', 'medicamentos', 'materiais', 'estoques', 'lotes',
+    'entradas', 'entrada_itens', 'saidas', 'saida_itens',
+    'movimentacoes', 'ajustes_estoque', 'importacoes_movimentacoes',
+    'fornecedores', 'configuracoes', 'logs_auditoria'
+  ]);
+  const restoreOrder = [...validTables];
 
         for (const table of restoreOrder) {
           const tableData = dadosRestore.database[table];
           if (!tableData || !Array.isArray(tableData)) continue;
+          if (!validTables.has(table)) continue;
 
-          await client.query(`TRUNCATE ${table} CASCADE`);
+          await client.query(`TRUNCATE "${table}" CASCADE`);
           if (tableData.length === 0) continue;
 
           const cols = Object.keys(tableData[0]);

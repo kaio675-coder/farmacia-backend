@@ -52,7 +52,7 @@ module.exports = function(pool) {
         return res.status(400).json({ error: 'Email ou usuário já existente' });
       }
       console.error('Erro ao criar usuário:', err.message);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Erro interno ao criar usuário.' });
     }
   });
 
@@ -91,7 +91,7 @@ module.exports = function(pool) {
         return res.status(400).json({ error: 'Email ou usuário já existente' });
       }
       console.error('Erro ao editar usuário:', err.message);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Erro interno ao editar usuário.' });
     }
   });
 
@@ -100,14 +100,14 @@ module.exports = function(pool) {
     try {
       const id = req.params.id;
       // Não permitir desativar a si mesmo
-      if (id === req.user.id) {
+      if (String(id) === String(req.user.id)) {
         return res.status(400).json({ error: 'Você não pode desativar seu próprio usuário' });
       }
       await pool.query('UPDATE usuarios SET ativo = FALSE, atualizado_em = NOW() WHERE id = $1', [id]);
       res.json({ ok: true });
     } catch (err) {
       console.error('Erro ao desativar usuário:', err.message);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Erro interno ao desativar usuário.' });
     }
   });
 
@@ -125,7 +125,7 @@ module.exports = function(pool) {
       res.json({ ok: true, message: 'Senha redefinida com sucesso' });
     } catch (err) {
       console.error('Erro ao redefinir senha:', err.message);
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Erro interno ao redefinir senha.' });
     }
   });
 

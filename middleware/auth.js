@@ -1,6 +1,10 @@
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'farmacia-plus-secret-key-2026';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('CRITICO: JWT_SECRET nao configurado. Defina a variavel de ambiente JWT_SECRET.');
+}
+const EFFECTIVE_SECRET = JWT_SECRET || 'fallback-not-for-production';
 const JWT_EXPIRES = '24h';
 
 // Middleware: exige autenticação
@@ -16,7 +20,7 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Não autenticado' });
   }
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, EFFECTIVE_SECRET);
     req.user = decoded;
     next();
   } catch (err) {
@@ -51,4 +55,4 @@ function requireImportPermission(req, res, next) {
   return res.status(403).json({ error: 'Sem permissão para importar movimentações' });
 }
 
-module.exports = { requireAuth, requireRole, requireImportPermission, JWT_SECRET, JWT_EXPIRES };
+module.exports = { requireAuth, requireRole, requireImportPermission, JWT_SECRET: EFFECTIVE_SECRET, JWT_EXPIRES };
