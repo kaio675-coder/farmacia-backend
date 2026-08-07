@@ -457,17 +457,81 @@ app.post('/api/movimentacoes', requireAuth, async (req, res) => {
       estoquePosterior = Number(mov.estoquePosterior || mov.quantidade);
     }
 
+    // =========================================================
+    // LOTES: Criar ou atualizar lote PRIMEIRO (para obter lote_id)
+    // =========================================================
+    let loteId = null;
+    let loteInfo = null;
+
+    if (tipoDb === 'entrada' && mov.lote && mov.lote.toString().trim()) {
+      const loteNum = mov.lote.toString().trim();
+      const validade = mov.validade || null;
+
+      const existingLote = await client.query(
+        'SELECT id, quantidade FROM lotes WHERE produto_id = $1 AND numero_lote = $2',
+        [mov.produto_id, loteNum]
+      );
+
+      if (existingLote.rows.length > 0) {
+        loteId = existingLote.rows[0].id;
+        const qtdAtual = Number(existingLote.rows[0].quantidade) || 0;
+        const novaQtd = qtdAtual + Number(mov.quantidade);
+
+        const updateFields = ['quantidade = $1'];
+        const updateParams = [novaQtd];
+        let paramIdx = 2;
+
+        if (validade) {
+          updateFields.push(`validade = $${paramIdx++}`);
+          updateParams.push(validade);
+        }
+
+        updateParams.push(loteId);
+        await client.query(
+          `UPDATE lotes SET ${updateFields.join(', ')} WHERE id = $${paramIdx}`,
+          updateParams
+        );
+
+        loteInfo = { id: loteId, numero_lote: loteNum, validade, quantidade: novaQtd, atualizado: true };
+      } else {
+        const insertResult = await client.query(
+          'INSERT INTO lotes (produto_id, numero_lote, validade, quantidade, data_entrada) VALUES ($1, $2, $3, $4, NOW()) RETURNING id',
+          [mov.produto_id, loteNum, validade, Number(mov.quantidade)]
+        );
+        loteId = insertResult.rows[0].id;
+        loteInfo = { id: loteId, numero_lote: loteNum, validade, quantidade: Number(mov.quantidade), atualizado: false };
+      }
+    }
+
+    // =========================================================
+    // Inserir movimentação com lote_id
+    // =========================================================
     await client.query(
-      `INSERT INTO movimentacoes (produto_id, tipo, quantidade, estoque_anterior, estoque_posterior, data, observacao, responsavel_id, origem)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      `INSERT INTO movimentacoes (produto_id, tipo, quantidade, estoque_anterior, estoque_posterior, data, observacao, responsavel_id, origem, lote_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [mov.produto_id, tipoDb, mov.quantidade, estoqueAtual, estoquePosterior,
-       mov.data ? new Date(mov.data + 'T12:00:00Z') : new Date(), mov.observacao || '', req.user.id, 'manual']
+       mov.data ? new Date(mov.data + 'T12:00:00Z') : new Date(), mov.observacao || '', req.user.id, 'manual', loteId]
     );
 
     await client.query(
       'UPDATE estoques SET quantidade_atual = $1, updated_at = NOW() WHERE produto_id = $2',
       [estoquePosterior, mov.produto_id]
     );
+
+    // =========================================================
+    // LOTES: Na saída, diminuir quantidade do lote
+    // =========================================================
+    if (tipoDb === 'saida' && mov.lote && mov.lote.toString().trim()) {
+      const loteNum = mov.lote.toString().trim();
+      const loteRow = await client.query(
+        'SELECT id, quantidade FROM lotes WHERE produto_id = $1 AND numero_lote = $2',
+        [mov.produto_id, loteNum]
+      );
+      if (loteRow.rows.length > 0) {
+        const novaQtd = Math.max(0, Number(loteRow.rows[0].quantidade) - Number(mov.quantidade));
+        await client.query('UPDATE lotes SET quantidade = $1 WHERE id = $2', [novaQtd, loteRow.rows[0].id]);
+      }
+    }
 
     const movResult = await client.query(
       `SELECT m.*, p.nome AS produto_nome FROM movimentacoes m LEFT JOIN produtos p ON p.id = m.produto_id WHERE m.produto_id = $1 ORDER BY m.data DESC, m.id DESC LIMIT 1`,
@@ -490,7 +554,8 @@ app.post('/api/movimentacoes', requireAuth, async (req, res) => {
       observacao: created.observacao || '',
       responsavel_id: created.responsavel_id,
       origem: created.origem || 'manual',
-      produto_nome: created.produto_nome || ''
+      produto_nome: created.produto_nome || '',
+      lote: loteInfo
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -555,6 +620,23 @@ app.delete('/api/movimentacoes/:id', requireAuth, async (req, res) => {
     }
     const mov = movResult.rows[0];
 
+    // Ajustar lote ao excluir movimentação
+    if (mov.lote_id) {
+      if (mov.tipo === 'entrada') {
+        // Excluindo entrada: diminuir quantidade do lote
+        await client.query(
+          'UPDATE lotes SET quantidade = GREATEST(0, quantidade - $1) WHERE id = $2',
+          [Number(mov.quantidade), mov.lote_id]
+        );
+      } else if (mov.tipo === 'saida') {
+        // Excluindo saída: aumentar quantidade do lote
+        await client.query(
+          'UPDATE lotes SET quantidade = quantidade + $1 WHERE id = $2',
+          [Number(mov.quantidade), mov.lote_id]
+        );
+      }
+    }
+
     await client.query('DELETE FROM movimentacoes WHERE id = $1', [id]);
     const novoEstoque = await recalcularEstoque(client, mov.produto_id);
 
@@ -592,7 +674,7 @@ app.put('/api/movimentacoes/:id', requireAuth, async (req, res) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
-    const { produto_id, data, quantidade, tipo, observacao } = req.body;
+    const { produto_id, data, quantidade, tipo, observacao, lote, validade } = req.body;
     await client.query('BEGIN');
 
     const movResult = await client.query(
@@ -609,9 +691,65 @@ app.put('/api/movimentacoes/:id', requireAuth, async (req, res) => {
     const tipoDb = tipoLower.includes('entrada') ? 'entrada' : tipoLower.includes('saida') || tipoLower.includes('saída') ? 'saida' : 'ajuste';
     const dataMov = data ? new Date(data + 'T12:00:00Z') : antigo.data;
 
+    // Reverter lote anterior se existia
+    if (antigo.lote_id) {
+      if (antigo.tipo === 'entrada') {
+        await client.query(
+          'UPDATE lotes SET quantidade = GREATEST(0, quantidade - $1) WHERE id = $2',
+          [Number(antigo.quantidade), antigo.lote_id]
+        );
+      } else if (antigo.tipo === 'saida') {
+        await client.query(
+          'UPDATE lotes SET quantidade = quantidade + $1 WHERE id = $2',
+          [Number(antigo.quantidade), antigo.lote_id]
+        );
+      }
+    }
+
+    // Criar/atualizar novo lote se fornecido
+    let novoLoteId = null;
+    if (lote && lote.toString().trim()) {
+      const loteNum = lote.toString().trim();
+      const validadeLote = validade || null;
+
+      const existingLote = await client.query(
+        'SELECT id, quantidade FROM lotes WHERE produto_id = $1 AND numero_lote = $2',
+        [produto_id || antigo.produto_id, loteNum]
+      );
+
+      if (existingLote.rows.length > 0) {
+        novoLoteId = existingLote.rows[0].id;
+        const qtdAtual = Number(existingLote.rows[0].quantidade) || 0;
+        let novaQtd;
+        if (tipoDb === 'entrada') {
+          novaQtd = qtdAtual + Number(quantidade);
+        } else if (tipoDb === 'saida') {
+          novaQtd = Math.max(0, qtdAtual - Number(quantidade));
+        } else {
+          novaQtd = qtdAtual;
+        }
+
+        const updateFields = ['quantidade = $1'];
+        const updateParams = [novaQtd];
+        let paramIdx = 2;
+        if (validadeLote) {
+          updateFields.push(`validade = $${paramIdx++}`);
+          updateParams.push(validadeLote);
+        }
+        updateParams.push(novoLoteId);
+        await client.query(`UPDATE lotes SET ${updateFields.join(', ')} WHERE id = $${paramIdx}`, updateParams);
+      } else {
+        const insertResult = await client.query(
+          'INSERT INTO lotes (produto_id, numero_lote, validade, quantidade, data_entrada) VALUES ($1, $2, $3, $4, NOW()) RETURNING id',
+          [produto_id || antigo.produto_id, loteNum, validadeLote, Number(quantidade)]
+        );
+        novoLoteId = insertResult.rows[0].id;
+      }
+    }
+
     await client.query(
-      `UPDATE movimentacoes SET produto_id = $1, tipo = $2, quantidade = $3, data = $4, observacao = $5 WHERE id = $6`,
-      [produto_id || antigo.produto_id, tipoDb, quantidade, dataMov, observacao !== undefined ? observacao : antigo.observacao, id]
+      `UPDATE movimentacoes SET produto_id = $1, tipo = $2, quantidade = $3, data = $4, observacao = $5, lote_id = $6 WHERE id = $7`,
+      [produto_id || antigo.produto_id, tipoDb, quantidade, dataMov, observacao !== undefined ? observacao : antigo.observacao, novoLoteId, id]
     );
 
     const targetProdutoId = produto_id || antigo.produto_id;
@@ -653,6 +791,32 @@ app.put('/api/movimentacoes/:id', requireAuth, async (req, res) => {
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
+  }
+});
+
+// =========================================================
+// ROTAS DE LOTES (protegidas)
+// =========================================================
+app.get('/api/lotes', requireAuth, async (req, res) => {
+  try {
+    const { produto_id } = req.query;
+    let sql = `
+      SELECT l.*, p.nome AS produto_nome, p.codigo AS produto_codigo, p.tipo AS produto_tipo
+      FROM lotes l
+      LEFT JOIN produtos p ON p.id = l.produto_id
+      WHERE l.quantidade > 0
+    `;
+    const params = [];
+    if (produto_id) {
+      params.push(produto_id);
+      sql += ` AND l.produto_id = $${params.length}`;
+    }
+    sql += ' ORDER BY p.nome, l.validade ASC NULLS LAST, l.numero_lote';
+    const result = await pool.query(sql, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Erro GET /api/lotes:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
