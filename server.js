@@ -42,6 +42,15 @@ pool.connect()
 // VIEW para retornar dados no formato que o frontend espera
 // =========================================================
 async function ensureView() {
+  await pool.query(`DO $$ BEGIN
+    ALTER TABLE medicamentos ADD COLUMN IF NOT EXISTS data_fabricacao DATE;
+  EXCEPTION WHEN duplicate_column THEN NULL;
+  END $$;`);
+  await pool.query(`DO $$ BEGIN
+    ALTER TABLE materiais ADD COLUMN IF NOT EXISTS data_fabricacao DATE;
+  EXCEPTION WHEN duplicate_column THEN NULL;
+  END $$;`);
+
   const sql = `
     CREATE OR REPLACE VIEW v_produtos_completo AS
     SELECT
@@ -68,7 +77,8 @@ async function ensureView() {
       m.apresentacao,
       m.fabricante AS fabricante_med,
       m.controlado,
-      mt.fabricante AS fabricante_mat
+      mt.fabricante AS fabricante_mat,
+      COALESCE(m.data_fabricacao, mt.data_fabricacao) AS data_fabricacao
     FROM produtos p
     LEFT JOIN medicamentos m ON m.produto_id = p.id
     LEFT JOIN materiais mt ON mt.produto_id = p.id
@@ -141,7 +151,8 @@ function mapProduto(row) {
     forma_farmaceutica: row.forma_farmaceutica || '',
     apresentacao: row.apresentacao || '',
     fabricante: row.fabricante_med || row.fabricante_mat || '',
-    controlado: row.controlado || false
+    controlado: row.controlado || false,
+    dataFabricacao: row.data_fabricacao ? row.data_fabricacao.toISOString().slice(0, 10) : ''
   };
 }
 
@@ -204,15 +215,15 @@ app.post('/api/produtos', requireAuth, async (req, res) => {
 
     if (tipo === 'medicamento') {
       await client.query(
-        `INSERT INTO medicamentos (produto_id, vencimento, nota_fiscal, entrada)
-         VALUES ($1, $2, $3, $4)`,
-        [produtoId, p.validade || null, p.nf || null, p.entradaQtd || 0]
+        `INSERT INTO medicamentos (produto_id, vencimento, nota_fiscal, entrada, data_fabricacao)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [produtoId, p.validade || null, p.nf || null, p.entradaQtd || 0, p.dataFabricacao || null]
       );
     } else {
       await client.query(
-        `INSERT INTO materiais (produto_id, vencimento, nota_fiscal, entrada)
-         VALUES ($1, $2, $3, $4)`,
-        [produtoId, p.validade || null, p.nf || null, p.entradaQtd || 0]
+        `INSERT INTO materiais (produto_id, vencimento, nota_fiscal, entrada, data_fabricacao)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [produtoId, p.validade || null, p.nf || null, p.entradaQtd || 0, p.dataFabricacao || null]
       );
     }
 
@@ -262,17 +273,17 @@ app.put('/api/produtos', requireAuth, async (req, res) => {
 
       if (tipo === 'medicamento') {
         await client.query(
-          `INSERT INTO medicamentos (produto_id, vencimento, nota_fiscal, entrada)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (produto_id) DO UPDATE SET vencimento=EXCLUDED.vencimento, nota_fiscal=EXCLUDED.nota_fiscal, entrada=EXCLUDED.entrada`,
-          [p.id, p.validade || null, p.nf || null, p.entradaQtd || 0]
+          `INSERT INTO medicamentos (produto_id, vencimento, nota_fiscal, entrada, data_fabricacao)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (produto_id) DO UPDATE SET vencimento=EXCLUDED.vencimento, nota_fiscal=EXCLUDED.nota_fiscal, entrada=EXCLUDED.entrada, data_fabricacao=EXCLUDED.data_fabricacao`,
+          [p.id, p.validade || null, p.nf || null, p.entradaQtd || 0, p.dataFabricacao || null]
         );
       } else {
         await client.query(
-          `INSERT INTO materiais (produto_id, vencimento, nota_fiscal, entrada)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (produto_id) DO UPDATE SET vencimento=EXCLUDED.vencimento, nota_fiscal=EXCLUDED.nota_fiscal, entrada=EXCLUDED.entrada`,
-          [p.id, p.validade || null, p.nf || null, p.entradaQtd || 0]
+          `INSERT INTO materiais (produto_id, vencimento, nota_fiscal, entrada, data_fabricacao)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (produto_id) DO UPDATE SET vencimento=EXCLUDED.vencimento, nota_fiscal=EXCLUDED.nota_fiscal, entrada=EXCLUDED.entrada, data_fabricacao=EXCLUDED.data_fabricacao`,
+          [p.id, p.validade || null, p.nf || null, p.entradaQtd || 0, p.dataFabricacao || null]
         );
       }
 
@@ -322,17 +333,17 @@ app.put('/api/produtos/:id', requireAuth, async (req, res) => {
 
     if (tipo === 'medicamento') {
       await client.query(
-        `INSERT INTO medicamentos (produto_id, vencimento, nota_fiscal, entrada)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (produto_id) DO UPDATE SET vencimento=EXCLUDED.vencimento, nota_fiscal=EXCLUDED.nota_fiscal, entrada=EXCLUDED.entrada`,
-        [id, p.validade || null, p.nf || null, p.entradaQtd || 0]
+        `INSERT INTO medicamentos (produto_id, vencimento, nota_fiscal, entrada, data_fabricacao)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (produto_id) DO UPDATE SET vencimento=EXCLUDED.vencimento, nota_fiscal=EXCLUDED.nota_fiscal, entrada=EXCLUDED.entrada, data_fabricacao=EXCLUDED.data_fabricacao`,
+        [id, p.validade || null, p.nf || null, p.entradaQtd || 0, p.dataFabricacao || null]
       );
     } else {
       await client.query(
-        `INSERT INTO materiais (produto_id, vencimento, nota_fiscal, entrada)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (produto_id) DO UPDATE SET vencimento=EXCLUDED.vencimento, nota_fiscal=EXCLUDED.nota_fiscal, entrada=EXCLUDED.entrada`,
-        [id, p.validade || null, p.nf || null, p.entradaQtd || 0]
+        `INSERT INTO materiais (produto_id, vencimento, nota_fiscal, entrada, data_fabricacao)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (produto_id) DO UPDATE SET vencimento=EXCLUDED.vencimento, nota_fiscal=EXCLUDED.nota_fiscal, entrada=EXCLUDED.entrada, data_fabricacao=EXCLUDED.data_fabricacao`,
+        [id, p.validade || null, p.nf || null, p.entradaQtd || 0, p.dataFabricacao || null]
       );
     }
 
@@ -520,6 +531,19 @@ app.post('/api/movimentacoes', requireAuth, async (req, res) => {
       'UPDATE estoques SET quantidade_atual = $1, updated_at = NOW() WHERE produto_id = $2',
       [estoquePosterior, mov.produto_id]
     );
+
+    // =========================================================
+    // Atualizar data_fabricacao do produto se fornecida na entrada
+    // =========================================================
+    if (tipoDb === 'entrada' && mov.data_fabricacao) {
+      const tipoResult = await client.query('SELECT tipo FROM produtos WHERE id = $1', [mov.produto_id]);
+      const prodTipo = tipoResult.rows.length ? tipoResult.rows[0].tipo : 'medicamento';
+      const tabela = prodTipo === 'material' ? 'materiais' : 'medicamentos';
+      await client.query(
+        `UPDATE ${tabela} SET data_fabricacao = $1 WHERE produto_id = $2`,
+        [mov.data_fabricacao, mov.produto_id]
+      );
+    }
 
     // =========================================================
     // LOTES: Na saída, diminuir quantidade do lote
