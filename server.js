@@ -176,6 +176,32 @@ function mapMovimentacao(row) {
   };
 }
 
+async function findDuplicateProduct(client, nome, tipo, codigo, excludeId) {
+  const normNome = (nome || '').trim().toUpperCase();
+  const normTipo = tipo === 'material' ? 'material' : 'medicamento';
+  const normCodigo = (codigo || '').trim().toUpperCase();
+
+  let query = `SELECT id, nome, codigo FROM produtos WHERE UPPER(TRIM(nome)) = $1 AND tipo = $2 AND ativo = TRUE`;
+  const params = [normNome, normTipo];
+  let idx = 3;
+
+  if (normCodigo) {
+    query += ` AND (UPPER(TRIM(codigo)) = $${idx} OR codigo IS NULL)`;
+    params.push(normCodigo);
+    idx++;
+  }
+
+  if (excludeId) {
+    query += ` AND id != $${idx}`;
+    params.push(excludeId);
+    idx++;
+  }
+
+  query += ` LIMIT 1`;
+  const result = await client.query(query, params);
+  return result.rows.length > 0 ? result.rows[0] : null;
+}
+
 // =========================================================
 // ROTAS DE PRODUTOS (protegidas)
 // =========================================================
@@ -199,12 +225,32 @@ app.get('/api/produtos/:id', requireAuth, async (req, res) => {
   }
 });
 
+app.post('/api/produtos/verificar-duplicata', requireAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { nome, tipo, codigo } = req.body;
+    if (!nome || !tipo) return res.status(400).json({ error: 'nome e tipo são obrigatórios' });
+    const dup = await findDuplicateProduct(client, nome, tipo, codigo, null);
+    res.json({ existe: !!dup, produto_id: dup ? dup.id : null, nome: dup ? dup.nome : null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 app.post('/api/produtos', requireAuth, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const p = req.body;
     const tipo = p.tipo === 'material' ? 'material' : 'medicamento';
+
+    const duplicate = await findDuplicateProduct(client, p.nome, tipo, p.codigo, null);
+    if (duplicate) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Produto já existe', produto_id: duplicate.id, nome: duplicate.nome });
+    }
 
     const prodResult = await client.query(
       `INSERT INTO produtos (nome, tipo, codigo, unidade, ativo, observacao)
@@ -271,6 +317,20 @@ app.put('/api/produtos', requireAuth, async (req, res) => {
     for (const p of items) {
       if (!p.id) continue;
       const tipo = p.tipo === 'material' ? 'material' : 'medicamento';
+
+      const existing = await client.query('SELECT nome, codigo FROM produtos WHERE id = $1', [p.id]);
+      const oldNome = existing.rows.length ? existing.rows[0].nome : '';
+      const oldCodigo = existing.rows.length ? existing.rows[0].codigo : '';
+      const nomeChanged = (p.nome || '').trim().toUpperCase() !== (oldNome || '').trim().toUpperCase();
+      const codigoChanged = (p.codigo || '').trim().toUpperCase() !== (oldCodigo || '').trim().toUpperCase();
+
+      if (nomeChanged || codigoChanged) {
+        const duplicate = await findDuplicateProduct(client, p.nome, tipo, p.codigo, p.id);
+        if (duplicate) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: 'Produto já existe', produto_id: duplicate.id, nome: duplicate.nome });
+        }
+      }
 
       await client.query(
         `UPDATE produtos SET nome=$1, tipo=$2, codigo=$3, unidade=$4, ativo=$5, observacao=$6, updated_at=NOW()
@@ -348,6 +408,20 @@ app.put('/api/produtos/:id', requireAuth, async (req, res) => {
     const p = req.body;
     const id = req.params.id;
     const tipo = p.tipo === 'material' ? 'material' : 'medicamento';
+
+    const existing = await client.query('SELECT nome, codigo FROM produtos WHERE id = $1', [id]);
+    const oldNome = existing.rows.length ? existing.rows[0].nome : '';
+    const oldCodigo = existing.rows.length ? existing.rows[0].codigo : '';
+    const nomeChanged = (p.nome || '').trim().toUpperCase() !== (oldNome || '').trim().toUpperCase();
+    const codigoChanged = (p.codigo || '').trim().toUpperCase() !== (oldCodigo || '').trim().toUpperCase();
+
+    if (nomeChanged || codigoChanged) {
+      const duplicate = await findDuplicateProduct(client, p.nome, tipo, p.codigo, id);
+      if (duplicate) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Produto já existe', produto_id: duplicate.id, nome: duplicate.nome });
+      }
+    }
 
     await client.query(
       `UPDATE produtos SET nome=$1, tipo=$2, codigo=$3, unidade=$4, ativo=$5, observacao=$6, updated_at=NOW()
